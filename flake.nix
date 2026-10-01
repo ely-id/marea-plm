@@ -27,6 +27,7 @@
         system: pkgs: rec {
           marea = pkgs.callPackage ./nix/package.nix { pleamar = pleamar.packages.${system}.pleamar; };
           deriva-worker = pkgs.callPackage ./nix/deriva.nix { };
+          marea-halley = pkgs.callPackage ./nix/halley.nix { };
           default = marea;
         }
       );

@@ -25,6 +25,7 @@
 }:
 let
   deriva = callPackage ./deriva.nix { };
+  halley = callPackage ./halley.nix { };
 in
 stdenvNoCC.mkDerivation {
   pname = "marea";
@@ -68,6 +69,7 @@ stdenvNoCC.mkDerivation {
           procps
           nodejs
           deriva
+          halley
         ]
       }
     runHook postInstall
