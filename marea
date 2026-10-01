@@ -21,8 +21,26 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/marea-plm"
 # Deriva's library (what is dropped on her, kept and found again) lives in her
 # folder: `deriva/`, built there. Hers goes first on the PATH.
 DERIVA="$HERE/deriva/target/release"
-PATH="$DERIVA:$PATH"
+HALLEY_ADAPTER="$HERE/halley/target/release"
+PATH="$HALLEY_ADAPTER:$DERIVA:$PATH"
 export PATH
+
+# Only Halley needs the SDK adapter. Other compositors keep Pleamar's services.
+build_halley() {
+    case ":${XDG_CURRENT_DESKTOP:-}:" in
+        *:Halley:*|*:halley:*) ;;
+        *) return 0 ;;
+    esac
+    if [ -x "$HALLEY_ADAPTER/marea-halley" ]; then
+        [ -z "$(find "$HERE/halley/src" "$HERE/halley/Cargo.toml" "$HERE/halley/Cargo.lock" -newer "$HALLEY_ADAPTER/marea-halley" 2> /dev/null)" ] && return 0
+    elif command -v marea-halley > /dev/null 2>&1; then
+        return 0
+    fi
+    if [ -w "$HERE/halley" ] && command -v cargo > /dev/null 2>&1; then
+        (cd "$HERE/halley" && cargo build --release --locked > "$STATE_DIR/halley-build.log" 2>&1) && return 0
+    fi
+    echo "Marea: Halley's adapter is unavailable; see $STATE_DIR/halley-build.log or build halley/Cargo.toml." >&2
+}
 
 # Built the first time she starts, and again when its source changes (after an
 # update), if there is Rust to build it with. Meanwhile she starts as ever;
@@ -45,6 +63,7 @@ case "${1:-}" in
         # The previous run's log is kept once and no more: so that it does not
         # grow forever, but yesterday's can still be looked at.
         [ -f "$STATE_DIR/marea.log" ] && mv -f "$STATE_DIR/marea.log" "$STATE_DIR/marea.log.1"
+        build_halley
         build_deriva
         exec "$PLEAMAR" --scene marea.plm --no-hud "$@" > "$STATE_DIR/marea.log" 2>&1
         ;;

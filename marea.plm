@@ -32,7 +32,7 @@ scene Marea {
         //  The network and the headphones are pleamar's own services now
         //  (NetworkManager and BlueZ, spoken to directly): listing, joining
         //  with a password, pairing. And `fd` finds the files and the folders.
-        run: "curl", "timedatectl", "node", "notify-send", "fd", "deriva-worker", "kill", "xdg-open", "grim", "slurp", "hyprctl", "magick", "wl-copy", "mkdir", "wf-recorder", "xdg-user-dir", "test", "pgrep", "swaybg", "pactl", "pleamar-wm"
+        run: "curl", "timedatectl", "node", "notify-send", "fd", "deriva-worker", "kill", "xdg-open", "grim", "slurp", "hyprctl", "magick", "wl-copy", "mkdir", "wf-recorder", "xdg-user-dir", "test", "pgrep", "swaybg", "pactl", "pleamar-wm", "marea-halley"
     }
     service clock as now { time: text = "--:--"; date: text; hour: number; minute: number }
     service audio as sound { volume: number; muted: bool; input: number; input_muted: bool }
@@ -150,6 +150,7 @@ scene Marea {
     event pick_network ->
     event pick_gadget ->
 
+    fact compositor_halley = false
     surface {
         //  The surface has to stretch to fit the card **and its shadow**: 18 px
         //  of offset plus 44 of spread, below and at the sides. Otherwise the
@@ -195,7 +196,10 @@ scene Marea {
         //  Not for the finder: it takes the keyboard exclusively as it opens,
         //  and changing layer at that same moment left it without the keyboard
         //  and without the clicks. The finder closes with Esc, as always.
-        level: top, overlay while open or tray_open or menu_open or reel_open
+        //  Halley hides the top layer under fullscreen too. Its finder needs
+        //  the overlay layer while searching; the Hyprland focus workaround
+        //  above still applies on the other backends.
+        level: top, overlay while open or tray_open or menu_open or reel_open or (compositor_halley and searching)
     }
 
     // ── where she lives ──────────────────────────────────────────

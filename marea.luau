@@ -5,6 +5,22 @@
 -- stuck the screen never finds out. The only thing here is what a rule CANNOT
 -- do: ask a service for something.
 
+local on_halley = false
+for desktop in (sys.ask("env", "XDG_CURRENT_DESKTOP") or ""):gmatch("[^:]+") do
+    if desktop:lower() == "halley" then on_halley = true end
+end
+fact.compositor_halley = on_halley
+
+local function window_call(action, id)
+    if on_halley then
+        run("marea-halley", { "window", action, tostring(id) }, function(_, code)
+            if code ~= 0 then log("Halley · could not " .. action .. " window " .. tostring(id)) end
+        end)
+    else
+        pcall(sys.call, "window." .. action, id)
+    end
+end
+
 -- ── the two levels ─────────────────────────────────────────────────
 --  The scene sends where the finger has gone, from 0 to 1. The value is not
 --  kept: the service keeps saying it, so raising the volume with the keyboard
@@ -421,7 +437,7 @@ on("open_result", function(i)
     end
     if h.window_id then
         log("going to the window", h.name)
-        pcall(sys.call, "window.activate", h.window_id)
+        window_call("activate", h.window_id)
     elseif h.exec then
         log("opening", h.name)
         sys.call("apps.launch", h.exec)
@@ -1714,6 +1730,35 @@ local function hyprctl(what, done)
     end
 end
 
+-- Halley does not advertise foreign-toplevel-management. The adapter uses its
+-- public SDK for focus and ordinary Wayland output metadata for capture bounds.
+local function monitor_info(done)
+    if on_halley then
+        run("marea-halley", { "outputs" }, function(out, code)
+            local ok, list = pcall(json.decode, out or "")
+            if code ~= 0 or not ok or type(list) ~= "table" then
+                log("Halley · could not enumerate outputs")
+                done({})
+                return
+            end
+            done(list)
+        end)
+    else
+        hyprctl("monitors", function(out)
+            local list = {}
+            for block in ((out or "") .. "\n\n"):gmatch("(Monitor .-)\n\n") do
+                local w, h, x, y = block:match("(%d+)x(%d+)@[%d%.]+ at (%-?%d+)x(%-?%d+)")
+                if w then
+                    list[#list + 1] = { name = block:match("Monitor (%S+)"),
+                        x = tonumber(x), y = tonumber(y), w = tonumber(w), h = tonumber(h),
+                        focused = block:find("focused: yes") ~= nil }
+                end
+            end
+            done(list)
+        end)
+    end
+end
+
 --  In the pictures folder the session names —`~/Pictures` in English,
 --  `~/Imágenes` in Spanish—, as the videos do.
 local PHOTOS = home_dir .. "/Imágenes/Marea"
@@ -1726,16 +1771,14 @@ end)
 --  The monitors: where the plane starts —`grim` photographs it whole and its
 --  corner is the one of the monitor furthest up and to the left— and which one
 --  has the focus.
-local function parse_monitors(txt)
+local function parse_monitors(list)
     local minx, miny, focused = 0, 0, nil
-    for block in (txt .. "\n\n"):gmatch("(Monitor .-)\n\n") do
-        local w, h, x, y = block:match("(%d+)x(%d+)@[%d%.]+ at (%-?%d+)x(%-?%d+)")
-        if w then
-            x, y = tonumber(x), tonumber(y)
-            minx, miny = math.min(minx, x), math.min(miny, y)
-            if block:find("focused: yes") then focused = { x = x, y = y, w = tonumber(w), h = tonumber(h) } end
-        end
+    for k, monitor in ipairs(list) do
+        if k == 1 and on_halley then minx, miny = monitor.x, monitor.y end
+        minx, miny = math.min(minx, monitor.x), math.min(miny, monitor.y)
+        if monitor.focused then focused = monitor end
     end
+    if focused == nil and on_halley and #list == 1 then focused = list[1] end
     return minx, miny, focused
 end
 
@@ -1755,12 +1798,24 @@ end
 on("gone", function()
     if fact.purpose ~= "shot" then return end
     local scope = fact.scope
+    if on_halley and scope == "active_window" then
+        -- SDK node geometry is not the presented rectangle. Guessing from it
+        -- would capture the wrong region after camera motion or fullscreen.
+        log("Halley · focused-window capture needs presented geometry, which API v1 does not expose")
+        emit("shot_cancelled")
+        return
+    end
     --  A breather so the compositor can take away whatever was closing.
     after(140, function()
         --  The active window is asked BEFORE freezing: it is the one that was there.
-        hyprctl("activewindow", function(window)
-            hyprctl("monitors", function(mons)
-                local minx, miny, focused = parse_monitors(mons or "")
+        local function capture(window)
+            monitor_info(function(mons)
+                local minx, miny, focused = parse_monitors(mons)
+                if on_halley and (#mons == 0 or (scope == "display" and not focused)) then
+                    log("Halley · no focused output is available for capture")
+                    emit("shot_cancelled")
+                    return
+                end
                 run("grim", { FRAME }, function(_, code)
                     if code ~= 0 then log("photo · grim could not freeze the screen"); emit("shot_cancelled"); return end
                     emit("frozen")
@@ -1781,7 +1836,8 @@ on("gone", function()
                     end
                 end)
             end)
-        end)
+        end
+        if on_halley then capture(nil) else hyprctl("activewindow", capture) end
     end)
 end)
 
@@ -1817,11 +1873,17 @@ on("fact:face", function(face)
     if face ~= "rec" or recorder ~= nil then return end
     run("pactl", { "get-default-sink" }, function(sound_sink, sink_code)
     if sink_code ~= 0 or sound_sink == "" then sound_sink = nil end
-    hyprctl("monitors", function(mons)
+    monitor_info(function(mons)
         if fact.face ~= "rec" then return end          -- she changed her mind during the countdown
         local monitor = nil
-        for block in ((mons or "") .. "\n\n"):gmatch("(Monitor .-)\n\n") do
-            if block:find("focused: yes") then monitor = block:match("Monitor (%S+)") end
+        for _, output in ipairs(mons) do
+            if output.focused then monitor = output.name end
+        end
+        if monitor == nil and on_halley and #mons == 1 then monitor = mons[1].name end
+        if on_halley and monitor == nil then
+            log("Halley · no focused output is available for recording")
+            emit("stop")
+            return
         end
         video = VIDEOS .. "/marea-" .. os.date("%Y%m%d-%H%M%S") .. ".mp4"
         local args = { "-f", video }
@@ -1920,10 +1982,10 @@ local WALLPAPER = settings.wallpaper or "/usr/share/wallpapers/cachyos-wallpaper
 local OUR_DISPLAY = "WAYLAND_DISPLAY=" .. tostring(sys.ask("env", "WAYLAND_DISPLAY") or "")
 run("pgrep", { "-x", "swaybg", "--env", OUR_DISPLAY }, function(_, code)
     if code == 0 then return end                        -- someone is already painting it
-    hyprctl("monitors", function(mons)
+    monitor_info(function(mons)
         local args = {}
-        for name in (mons or ""):gmatch("Monitor (%S+)") do
-            for _, a in ipairs({ "-o", name, "-i", WALLPAPER, "-m", "fill" }) do args[#args + 1] = a end
+        for _, monitor in ipairs(mons) do
+            for _, a in ipairs({ "-o", monitor.name, "-i", WALLPAPER, "-m", "fill" }) do args[#args + 1] = a end
         end
         if #args == 0 then return end
         --  With `run` and without collecting its output: that way it does not
@@ -2330,22 +2392,37 @@ end
 hooks.restore_all = function()
     for k = 1, 6 do
         local id = stone_slots[k]
-        if id ~= nil then pcall(sys.call, "window.restore", id) end
+        if id ~= nil then window_call("restore", id) end
     end
 end
 on("restore_stone", function(k)
     local id = stone_slots[(k or 0) + 1]
-    if id ~= nil then pcall(sys.call, "window.restore", id) end
+    if id ~= nil then window_call("restore", id) end
 end)
 
-if not sys.watch("window", function(v)
+local function from_window(v)
     focused = (v and v.monitor) or ""
     open_windows = (v and v.list) or {}
     if fact.following == true then decide() end
     --  In pleamar-wm what is put away floats on the shore of its monitor
     --  (tiled, nothing is): her island keeps no stones there.
     set_stones((not in_wm) and v and v.list or {})
-end) then log("this compositor does not say where the focus is: «follow me» will not work") end
+end
+if on_halley then
+    local function watch()
+        local ok = pcall(spawn, "marea-halley", { "watch" }, function(line)
+            local valid, value = pcall(json.decode, line)
+            if valid and type(value) == "table" then from_window(value) end
+        end, function()
+            from_window(nil)
+            after(1000, watch)
+        end)
+        if not ok then log("Halley · marea-halley is unavailable") end
+    end
+    watch()
+elseif not sys.watch("window", from_window) then
+    log("this compositor does not say where the focus is: «follow me» will not work")
+end
 
 --  Its number, in pleamar-wm's order of the monitors, to its name.
 local function point_to(id)
